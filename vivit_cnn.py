@@ -300,44 +300,42 @@ def draw_motion_arrows(image, current_keypoints, next_keypoints, color=(255, 0, 
             cv2.arrowedLine(image, (x1, y1), (x2, y2), color, 1, tipLength=0.2)
 
 
-def create_motion_intensity_map(image, current_keypoints, next_keypoints, color=(0, 0, 255), 
-                                sigma=20, magnitude_scale=15, movement_threshold=0.01):
+def create_motion_intensity_map(image, current_keypoints, next_keypoints, color=(0, 0, 255), sigma=20, magnitude_scale=15, movement_threshold=0.01):
     h, w = image.shape[:2]
-    intensity_map = np.zeros((h, w), dtype=np.float32)
-    
+    motion_map = np.zeros((h, w), dtype=np.float32)
+
     current_keypoints = np.array(current_keypoints)
     next_keypoints = np.array(next_keypoints)
-    
+
     # Проверка размерности и преобразование при необходимости
     if current_keypoints.ndim == 1:
         current_keypoints = current_keypoints.reshape(-1, 2)
     if next_keypoints.ndim == 1:
         next_keypoints = next_keypoints.reshape(-1, 2)
-        
+
     # Нормализация координат
     current_keypoints[:, 0] = np.clip(current_keypoints[:, 0], 0, w-1)
     current_keypoints[:, 1] = np.clip(current_keypoints[:, 1], 0, h-1)
     next_keypoints[:, 0] = np.clip(next_keypoints[:, 0], 0, w-1)
     next_keypoints[:, 1] = np.clip(next_keypoints[:, 1], 0, h-1)
-    
+
     for current, next in zip(current_keypoints, next_keypoints):
         x1, y1 = map(int, current)
         x2, y2 = map(int, next)
-        
         dx, dy = x2 - x1, y2 - y1
         magnitude = np.sqrt(dx**2 + dy**2)
-        
+
         # Применяем порог движения
         if magnitude < movement_threshold:
             continue
-        
+
         # Применяем масштабирование к величине движения
         scaled_magnitude = magnitude * magnitude_scale
-        
+
         # Создаем гауссово ядро
         y, x = np.ogrid[-sigma:sigma+1, -sigma:sigma+1]
         kernel = np.exp(-(x*x + y*y) / (2.*sigma*sigma))
-        
+
         # Определяем область применения ядра
         x_min, x_max = max(0, x1-sigma), min(w, x1+sigma+1)
         y_min, y_max = max(0, y1-sigma), min(h, y1+sigma+1)
@@ -345,30 +343,42 @@ def create_motion_intensity_map(image, current_keypoints, next_keypoints, color=
         kernel_x_max = min(2*sigma+1, sigma + (x_max - x1))
         kernel_y_min = max(0, sigma - (y1 - y_min))
         kernel_y_max = min(2*sigma+1, sigma + (y_max - y1))
-        
-        # Применяем ядро к карте интенсивности
+
+        # Применяем ядро к карте движения
         kernel_part = kernel[kernel_y_min:kernel_y_max, kernel_x_min:kernel_x_max]
-        map_part = intensity_map[y_min:y_max, x_min:x_max]
-        
+        map_part = motion_map[y_min:y_max, x_min:x_max]
         if kernel_part.shape == map_part.shape:
-            intensity_map[y_min:y_max, x_min:x_max] += kernel_part * scaled_magnitude
-    
-    # Нормализация интенсивности
-    max_intensity = np.max(intensity_map)
-    if max_intensity > 0:
-        intensity_map = intensity_map / max_intensity
-    
+            motion_map[y_min:y_max, x_min:x_max] += kernel_part * scaled_magnitude
+
+    # Нормализация карты движения
+    max_motion = np.max(motion_map)
+    if max_motion > 0:
+        motion_map = motion_map / max_motion
+
     # Создание цветной карты
     color_map = np.zeros((h, w, 3), dtype=np.float32)
     for i in range(3):
-        color_map[:,:,i] = intensity_map * color[i]
+        color_map[:,:,i] = motion_map * color[i] / 255.0
+
+    return color_map
+
+def combine_motion_maps(image, *motion_maps):
+    combined_map = np.zeros_like(image, dtype=np.float32)
+    for map in motion_maps:
+        combined_map += map
     
+    # Clip values to [0, 1] range
+    combined_map = np.clip(combined_map, 0, 1)
+
     # Гамма-коррекция для улучшения визуализации
     gamma = 0.4
-    color_map = np.power(color_map / 255.0, gamma) * 255.0
-    color_map = np.uint8(color_map)
-    
-    return color_map
+    combined_map = np.power(combined_map, gamma)
+
+    # Наложение цветной карты на исходное изображение
+    result = cv2.addWeighted(image, 0.7, (combined_map * 255).astype(np.uint8), 0.3, 0)
+
+    return result
+
     
 def resize_to_512(image):
     """Функция для изменения размера изображения до 512x512"""
@@ -487,9 +497,9 @@ class VideoSequenceDataset(Dataset):
                 image_with_motion = cv2.resize(image_with_motion, (512, 512), interpolation=cv2.INTER_AREA)
                 
                 multi_channel_image = np.stack([
-                    image_original,
+#                    image_original,
 #                    image_white,
-#                    image_with_data,
+                    image_with_data,
                     image_with_motion
                 ], axis=-1)
 
@@ -653,13 +663,13 @@ class VideoSequenceDataset(Dataset):
             if next_key != key:  # Only draw motion arrows if we have a different next frame
                 # For body
                 next_body_keypoints = next_data['body_detections']['keypoints'][0]
-                image_with_motion = create_motion_intensity_map(image_with_motion, 
+                body_motion_map = create_motion_intensity_map(image_with_motion, 
                                    [[x-x_min, y-y_min] for x, y in body_keypoints], 
                                    [[x-x_min, y-y_min] for x, y in next_body_keypoints], (0, 0, 255))
                 
                 # For face
                 next_face_keypoints = next_data['face_detections']['keypoints'][0]
-                image_with_motion = create_motion_intensity_map(image_with_motion, 
+                face_motion_map = create_motion_intensity_map(image_with_motion, 
                                    [[x-x_min, y-y_min] for x, y in face_keypoints], 
                                    [[x-x_min, y-y_min] for x, y in next_face_keypoints], (255, 0, 0))
                 
@@ -679,10 +689,12 @@ class VideoSequenceDataset(Dataset):
                 
                 # Draw motion arrows for hands, matching keypoints by index
                 min_keypoints = min(len(current_hand_keypoints), len(next_hand_keypoints))
-                image_with_motion = create_motion_intensity_map(image_with_motion, 
+                hands_motion_map = create_motion_intensity_map(image_with_motion, 
                                    current_hand_keypoints[:min_keypoints], 
-                                   next_hand_keypoints[:min_keypoints], (0, 255, 0))
-
+                                   next_hand_keypoints[:min_keypoints], (0, 255, 0), sigma=15, magnitude_scale=15)
+                
+                image_with_motion = combine_motion_maps(image_with_motion, body_motion_map, face_motion_map, hands_motion_map)
+                
             # Save the results
 #            sys.exit(0)
                 
@@ -710,9 +722,9 @@ class VideoSequenceDataset(Dataset):
             image_with_motion = cv2.resize(image_with_motion, (512, 512), interpolation=cv2.INTER_AREA)
             
             multi_channel_image = np.stack([
-                image_original,
+#                image_original,
 #                image_white,
-#                image_with_data,
+                image_with_data,
                 image_with_motion
             ], axis=-1)
 
@@ -814,37 +826,35 @@ try:
     model = CNNBiLSTMWithAttention(num_classes=42, sequence_length=sequence_length, lstm_hidden_size=1024).to(device)
     criterion = nn.CrossEntropyLoss().to(dtype=DTYPE)
     optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)
-
+    current_lr = 0.001
+    
     # Цикл обучения
     step = 0
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
-        train_accuracy = 0.0
+        correct_predictions = 0
+        total_samples = 0
         
-        # Создаем прогресс-бар для обучающего цикла
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]", leave=False)
         
         for embeddings, labels in train_pbar:
             embeddings, labels = embeddings.to(device), labels.to(device)
             current_shape = embeddings.size()
-
             embeddings = embeddings.reshape(current_shape[0], sequence_length, -1, 512, 512)
             embeddings = torch.nan_to_num(embeddings, nan=0.0)
             
             try:
-#                if torch.isnan(embeddings).any() or torch.isinf(embeddings).any():
-#                    print(f"NaN or Inf detected in input data at step {step}")
-#                    continue
                 optimizer.zero_grad()
                 outputs = model(embeddings)
                 loss = criterion(outputs, labels)
                 loss.backward()
-                
                 optimizer.step()
                 
                 train_loss += loss.item()
-                train_accuracy += compute_accuracy(outputs, labels)
+                batch_accuracy = compute_accuracy(outputs, labels)
+                correct_predictions += batch_accuracy * labels.size(0)
+                total_samples += labels.size(0)
                 
                 if np.isnan(loss.item()) or np.isinf(loss.item()):
                     print(loss.item())
@@ -853,10 +863,9 @@ try:
                 
                 step += 1
                 
-                # Обновляем информацию в прогресс-баре
                 train_pbar.set_postfix({
                     'loss': f"{train_loss / (step % len(train_loader) or len(train_loader)):.4f}",
-                    'acc': f"{train_accuracy / (step % len(train_loader) or len(train_loader)):.4f}"
+                    'acc': f"{correct_predictions / total_samples:.4f}"
                 })
                 
             except RuntimeError as e:
@@ -864,18 +873,16 @@ try:
                 logging.error(f"Input shape: {embeddings.shape}")
                 logging.error(f"Input dtype: {embeddings.dtype}")
                 raise
-    
+
         train_loss /= len(train_loader)
-        train_accuracy /= len(train_loader)
+        train_accuracy = correct_predictions / total_samples
         
-        current_lr = optimizer.param_groups[0]['lr']
-    
         # Валидация
         model.eval()
         val_loss = 0.0
-        val_accuracy = 0.0
+        correct_predictions = 0
+        total_samples = 0
         
-        # Создаем прогресс-бар для валидационного цикла
         val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]", leave=False)
         
         with torch.no_grad():
@@ -889,18 +896,19 @@ try:
                 loss = criterion(outputs, labels)
                 
                 val_loss += loss.item()
-                val_accuracy += compute_accuracy(outputs, labels)
+                batch_accuracy = compute_accuracy(outputs, labels)
+                correct_predictions += batch_accuracy * labels.size(0)
+                total_samples += labels.size(0)
                 
-                # Обновляем информацию в прогресс-баре
                 val_pbar.set_postfix({
-                    'loss': f"{val_loss / (step % len(val_loader) or len(val_loader)):.4f}",
-                    'acc': f"{val_accuracy / (step % len(val_loader) or len(val_loader)):.4f}"
+                    'loss': f"{val_loss / (val_pbar.n + 1):.4f}",
+                    'acc': f"{correct_predictions / total_samples:.4f}"
                 })
         
         val_loss /= len(val_loader)
-        val_accuracy /= len(val_loader)
+        val_accuracy = correct_predictions / total_samples
         
-        if best_loss < val_accuracy:
+        if val_accuracy > best_loss:
             best_loss = val_accuracy
             torch.save(model.state_dict(), 'bilstm_contourlet.pth')
         
