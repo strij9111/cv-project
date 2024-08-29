@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import OneCycleLR
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils import shuffle
@@ -23,6 +24,7 @@ import logging
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.pyplot as plt
 import pandas as pd
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -153,7 +155,7 @@ class HDF5Dataset(Dataset):
 class ResidualLSTM(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(ResidualLSTM, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, bidirectional=True, batch_first=True)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, bidirectional=True, batch_first=True, dropout=0.3)
         self.residual = nn.Linear(input_size, hidden_size * 2)
         self.ln = nn.LayerNorm(hidden_size * 2)
         
@@ -175,32 +177,29 @@ class AttentionLayer(nn.Module):
         return context_vector, attention_weights
 
 class CNNBiLSTMWithAttention(nn.Module):
-    def __init__(self, num_classes, sequence_length=32, lstm_hidden_size=256):
+    def __init__(self, num_classes, sequence_length=12, lstm_hidden_size=256):
         super(CNNBiLSTMWithAttention, self).__init__()
         
         self.sequence_length = sequence_length
         
         self.cnn = nn.Sequential(
-            nn.Conv3d(sequence_length, 32, kernel_size=(3, 3, 16), padding=(1, 1, 1)),
+            nn.Conv3d(sequence_length, 32, kernel_size=(3, 3, 9), padding=(1, 1, 1)),
             nn.ReLU(),
             nn.BatchNorm3d(32),
-            nn.Conv3d(32, 64, kernel_size=(3, 3, 9), padding=(1, 1, 1)),
-            nn.ReLU(),
-            nn.BatchNorm3d(64),
-            nn.AdaptiveAvgPool3d((sequence_length, 20, 20))
+            nn.AdaptiveAvgPool3d((sequence_length, 32, 32))
         )
         
-        self.cnn_output_size = 64 * 20 * 20
+        self.cnn_output_size = 32 * 32 * 32
         
-        self.bn1 = nn.BatchNorm1d(self.cnn_output_size)
-        self.dropout1 = nn.Dropout(0.1)
+#        self.bn1 = nn.BatchNorm1d(self.cnn_output_size)
+        self.dropout1 = nn.Dropout(0.3)
         
         self.residual_lstm = ResidualLSTM(self.cnn_output_size, lstm_hidden_size)
         
         self.attention = AttentionLayer(lstm_hidden_size * 2)
         
         self.ln = nn.LayerNorm(lstm_hidden_size * 2)
-        self.dropout2 = nn.Dropout(0.1)
+        self.dropout2 = nn.Dropout(0.3)
         self.fc = nn.Linear(lstm_hidden_size * 2, num_classes)
         
         self.init_weights()
@@ -221,7 +220,7 @@ class CNNBiLSTMWithAttention(nn.Module):
         cnn_out = self.cnn(x)
         cnn_out = cnn_out.permute(0, 2, 1, 3, 4).reshape(batch_size, self.sequence_length, -1)
         
-        cnn_out = self.bn1(cnn_out.reshape(-1, self.cnn_output_size)).reshape(batch_size, self.sequence_length, -1)
+#        cnn_out = self.bn1(cnn_out.reshape(-1, self.cnn_output_size)).reshape(batch_size, self.sequence_length, -1)
 #        cnn_out = self.dropout1(cnn_out)
         
         lstm_out = self.residual_lstm(cnn_out)
@@ -498,7 +497,7 @@ class VideoSequenceDataset(Dataset):
                 
                 multi_channel_image = np.stack([
 #                    image_original,
-#                    image_white,
+                    image_white,
                     image_with_data,
                     image_with_motion
                 ], axis=-1)
@@ -697,13 +696,6 @@ class VideoSequenceDataset(Dataset):
                 
             # Save the results
 #            sys.exit(0)
-                
-#            if aug_idx > 0:  # Применяем аугментацию ко всем кроме оригинальной последовательности
-#                augmented = self.aug_transform(image=image)
-#                images.append(augmented['image'])
-#            else:
-#                augmented = self.notaug_transform(image=image)
-#                images.append(augmented['image'])
 
             images_to_check = [image_original, image_white, image_with_data, image_with_motion]
             resized_images = check_and_resize_images(images_to_check)
@@ -723,7 +715,7 @@ class VideoSequenceDataset(Dataset):
             
             multi_channel_image = np.stack([
 #                image_original,
-#                image_white,
+                image_white,
                 image_with_data,
                 image_with_motion
             ], axis=-1)
@@ -762,7 +754,7 @@ def stratified_train_test_split(sequences, test_size=0.2, random_state=None):
     
     return train_sequences, val_sequences
         
-sequence_length = 22
+sequence_length = 12
 num_epochs = 25
 
 print("Starting data preparation #1")
@@ -781,7 +773,7 @@ print("Starting data preparation #2")
 train_dataset = VideoSequenceDataset(
     root_dir="c:\\Users\\Profi\\Downloads\\ContourletCNN\\data",
     sequence_length=sequence_length,
-    augmentations_per_sample=2
+    augmentations_per_sample=0
 )
 train_dataset.video_sequences = train_sequences
 
@@ -819,18 +811,39 @@ def compute_accuracy(outputs, labels):
     correct = (predicted == labels).sum().item()
     return correct / labels.size(0)
 
+def l1_loss(model, lambda_l1=0.01):
+    l1_loss = 0
+    for param in model.parameters():
+        l1_loss += torch.sum(torch.abs(param))
+    return lambda_l1 * l1_loss
+    
 torch.autograd.set_detect_anomaly(True)
+checkpoint_path = 'checkpoint.pth'
 
 try:
     best_loss = 0
-    model = CNNBiLSTMWithAttention(num_classes=42, sequence_length=sequence_length, lstm_hidden_size=1024).to(device)
+    model = CNNBiLSTMWithAttention(num_classes=8, sequence_length=sequence_length, lstm_hidden_size=1024).to(device)
     criterion = nn.CrossEntropyLoss().to(dtype=DTYPE)
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)
+    optimizer = optim.RAdam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    scheduler = OneCycleLR(optimizer, max_lr=0.01, epochs=num_epochs, steps_per_epoch=len(train_loader))
     current_lr = 0.001
     
     # Цикл обучения
     step = 0
-    for epoch in range(num_epochs):
+    start_epoch = 0
+    
+    # Проверка наличия контрольной точки
+    if os.path.exists(checkpoint_path):
+        print("Loading checkpoint...")
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        best_loss = checkpoint['best_loss']
+        start_epoch = checkpoint['epoch'] + 1
+        step = checkpoint['step']
+
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         train_loss = 0.0
         correct_predictions = 0
@@ -847,9 +860,10 @@ try:
             try:
                 optimizer.zero_grad()
                 outputs = model(embeddings)
-                loss = criterion(outputs, labels)
+                loss = criterion(outputs, labels)# + l1_loss(model)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
                 
                 train_loss += loss.item()
                 batch_accuracy = compute_accuracy(outputs, labels)
@@ -910,13 +924,26 @@ try:
         
         if val_accuracy > best_loss:
             best_loss = val_accuracy
-            torch.save(model.state_dict(), 'bilstm_contourlet.pth')
+#            torch.save(model.state_dict(), 'bilstm_contourlet.pth')
+
+            # Сохранение контрольной точки
+            checkpoint = {
+                'epoch': epoch,
+                'step': step,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_loss': best_loss,
+            }
+            torch.save(checkpoint, checkpoint_path)
+    
+        current_lr = scheduler.get_last_lr()[0]
         
         print(f"Epoch [{epoch+1}/{num_epochs}], "
               f"Train Loss: {train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
               f"Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}, Learning Rate: {current_lr:.4f}")
     
-    torch.save(model.state_dict(), 'bilstm_contourlet_final.pth')
+#    torch.save(model.state_dict(), 'bilstm_contourlet_final.pth')
     print(f"Best val acc: {best_loss}")
 
 except Exception as e:
