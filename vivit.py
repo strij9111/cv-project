@@ -4,11 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim
 from torchvision import datasets, transforms
-from torchvision.models import inception_v3, Inception_V3_Weights
-from torchvision.models import vit_l_16, ViT_L_16_Weights
-from pycontourlet.pycontourlet4d.pycontourlet import batch_multi_channel_pdfbdec
 from torch.utils.data import Dataset, Subset, DataLoader, TensorDataset
-from torch.utils.data import DataLoader
 import torch.optim as optim
 from torch.optim.lr_scheduler import OneCycleLR
 from sklearn.model_selection import train_test_split
@@ -17,31 +13,16 @@ from sklearn.utils import shuffle
 import torch.nn as nn
 import random
 import sys
-import pickle
 import os
-from transformers import CLIPTextModel, CLIPTokenizer
 from transformers import ViTImageProcessor, ViTForImageClassification, pipeline
 import logging
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-import pandas as pd
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
 import h5py
-import torch
 import torchvision.models as models
-from torchvision import transforms
-from PIL import Image
 from collections import defaultdict
-import hashlib
-import requests
-import json
-import uuid
-import tempfile
-import math
-from ultralyticsplus import YOLO, render_result
 
 # Device settings
 use_cuda = torch.cuda.is_available()
@@ -67,11 +48,6 @@ pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict a
 # Загрузка обновлённого словаря состояний в модель
 model_dict.update(pretrained_dict)
 model.load_state_dict(model_dict)
-
-# Перевод модели в режим оценки
-model.eval()
-yolo = YOLO('lewiswatson/yolov8x-tuned-hand-gestures')
-yolo.to(device)
 
 # Загрузка модели и процессора
 model_name = "dima806/hand_gestures_image_detection"
@@ -166,7 +142,7 @@ def split_and_get_embeddings_stack(images):
 def get_embeddings(images):
     return split_and_get_embeddings_stack(images)
 
-def preprocess_and_save_dataset(dataset, output_file, batch_size=16):
+def preprocess_and_save_dataset(dataset, output_file, batch_size=128):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     
@@ -227,7 +203,7 @@ class HDF5Dataset(Dataset):
 class ResidualLSTM(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(ResidualLSTM, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, bidirectional=True, batch_first=True, dropout=0.3)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=3, bidirectional=True, batch_first=True, dropout=0.3)
         self.residual = nn.Linear(input_size, hidden_size * 2)
         
     def forward(self, x):
@@ -461,7 +437,7 @@ train_sequences, val_sequences = stratified_train_test_split(all_sequences, test
 train_dataset = VideoSequenceDataset(
     root_dir="data",
     sequence_length=sequence_length,
-    augmentations_per_sample=1
+    augmentations_per_sample=0
 )
 train_dataset.video_sequences = train_sequences
 
@@ -487,8 +463,8 @@ val_data = HDF5Dataset('preprocessed_val_dataset.h5')
 print(f"Train data size: {len(train_data)}")
 print(f"Validation data size: {len(val_data)}")
 
-train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
-val_loader = DataLoader(val_data, batch_size=64, shuffle=False)
+train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_data, batch_size=32, shuffle=False)
 
 # Функция для вычисления точности
 def compute_accuracy(outputs, labels):
@@ -517,9 +493,9 @@ def compute_attention_stats(attention_weights):
         
 
 best_acc = 0
-model = CNNBiLSTMWithAttention(num_classes=42, sequence_length=sequence_length, lstm_hidden_size=512).to(device)
+model = CNNBiLSTMWithAttention(num_classes=986, sequence_length=sequence_length, lstm_hidden_size=512).to(device)
 criterion = nn.CrossEntropyLoss().to(dtype=DTYPE)
-optimizer = optim.RAdam(model.parameters(), lr=0.001, weight_decay=1e-4)
+optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
 #    scheduler = OneCycleLR(optimizer, max_lr=0.01, epochs=num_epochs, steps_per_epoch=len(train_loader))
 # Цикл обучения
 step = 0
